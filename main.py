@@ -5,3 +5,5 @@ while True:
     else:
         print(f"Hello, {name}!")
         break
+
+print("Hello World!")
