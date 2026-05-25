@@ -15,3 +15,5 @@ class ActivitySubject:
 
     def mark_completed(self):
         self.notify()
+
+# Метод для видалення об'єкта
