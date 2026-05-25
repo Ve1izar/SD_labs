@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+venv/
+env/
+
+# Streamlit & SQLite
+local_tracker.db
+.streamlit/
+
+# Тестування та покриття
+.coverage
+htmlcov/
+
+# Файли IDE
+.vscode/
+.idea/

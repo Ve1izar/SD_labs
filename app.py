@@ -1,19 +1,152 @@
 import streamlit as st
+import sqlite3
 import re
 from datetime import datetime, date
-
-# Імпортуємо наші модулі
-from database import DatabaseManager
-from models import ActivitySubject
-from observers import StreamlitNotifier, DBLogObserver
+from abc import ABC, abstractmethod
 
 
+# ==========================================
+# 1. Singleton: Локальна База Даних (CRUD)
+# ==========================================
+class DatabaseManager:
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance.conn = sqlite3.connect("local_tracker.db", check_same_thread=False)
+            cls._instance.create_tables()
+        return cls._instance
+
+    def create_tables(self):
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS activities (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                type TEXT, 
+                name TEXT,
+                detail TEXT, 
+                status TEXT
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                activity_name TEXT,
+                completed_at TEXT
+            )
+        """)
+        self.conn.commit()
+
+    def add_activity(self, act_type: str, name: str, detail: str):
+        cursor = self.conn.cursor()
+        cursor.execute("INSERT INTO activities (type, name, detail, status) VALUES (?, ?, ?, 'active')",
+                       (act_type, name, detail))
+        self.conn.commit()
+
+    def get_activities(self, act_type: str):
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT id, name, detail, status FROM activities WHERE type = ? AND status = 'active'",
+                       (act_type,))
+        return cursor.fetchall()
+
+    def update_activity(self, act_id: int, new_name: str, detail: str):
+        cursor = self.conn.cursor()
+        # Спочатку дізнаємося стару назву, щоб оновити її і в логах (щоб не втратити історію)
+        cursor.execute("SELECT name FROM activities WHERE id = ?", (act_id,))
+        old_name = cursor.fetchone()[0]
+
+        cursor.execute("UPDATE activities SET name = ?, detail = ? WHERE id = ?", (new_name, detail, act_id))
+
+        # Якщо назва змінилась, оновлюємо її в логах, щоб статистика не розірвалась
+        if old_name != new_name:
+            cursor.execute("UPDATE logs SET activity_name = ? WHERE activity_name = ?", (new_name, old_name))
+
+        self.conn.commit()
+
+    def delete_activity(self, act_id: int):
+        cursor = self.conn.cursor()
+        cursor.execute("DELETE FROM activities WHERE id = ?", (act_id,))
+        self.conn.commit()
+
+    def mark_activity_completed(self, act_id: int):
+        cursor = self.conn.cursor()
+        cursor.execute("UPDATE activities SET status = 'completed' WHERE id = ?", (act_id,))
+        self.conn.commit()
+
+    # --- Методи для логів ---
+    def log_completion(self, name: str, time_str: str):
+        cursor = self.conn.cursor()
+        cursor.execute("INSERT INTO logs (activity_name, completed_at) VALUES (?, ?)", (name, time_str))
+        self.conn.commit()
+
+    def get_logs(self):
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT id, activity_name, completed_at FROM logs ORDER BY id DESC")
+        return cursor.fetchall()
+
+    def get_completion_count(self, name: str) -> int:
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM logs WHERE activity_name = ?", (name,))
+        return cursor.fetchone()[0]
+
+    def update_log(self, log_id: int, new_name: str, new_time: str):
+        cursor = self.conn.cursor()
+        cursor.execute("UPDATE logs SET activity_name = ?, completed_at = ? WHERE id = ?", (new_name, new_time, log_id))
+        self.conn.commit()
+
+    def delete_log(self, log_id: int):
+        cursor = self.conn.cursor()
+        cursor.execute("DELETE FROM logs WHERE id = ?", (log_id,))
+        self.conn.commit()
+
+
+# ==========================================
+# 2. Observer: Система подій
+# ==========================================
+class Observer(ABC):
+    @abstractmethod
+    def update(self, activity_name: str):
+        pass
+
+
+class ActivitySubject:
+    def __init__(self, name: str):
+        self.name = name
+        self._observers = []
+
+    def attach(self, observer: Observer):
+        if observer not in self._observers:
+            self._observers.append(observer)
+
+    def notify(self):
+        for obs in self._observers:
+            obs.update(self.name)
+
+    def mark_completed(self):
+        self.notify()
+
+
+class StreamlitNotifier(Observer):
+    def update(self, activity_name: str):
+        st.session_state.show_success = activity_name
+
+
+class DBLogObserver(Observer):
+    def update(self, activity_name: str):
+        time_now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        db = DatabaseManager()
+        db.log_completion(activity_name, time_now)
+
+
+# ==========================================
+# 3. Інтерфейс Streamlit
+# ==========================================
 def render_crud_interface(page_type: str, detail_label: str):
     db = DatabaseManager()
 
     st.header(f"Управління: {page_type.capitalize()}")
 
-    # Форма додавання
     with st.expander(f"➕ Додати нове {page_type.lower()}", expanded=True):
         new_name = st.text_input("Назва", key=f"new_name_{page_type}")
 
@@ -49,7 +182,6 @@ def render_crud_interface(page_type: str, detail_label: str):
 
     st.divider()
 
-    # Список та управління
     activities = db.get_activities(page_type)
 
     if not activities:
@@ -66,26 +198,24 @@ def render_crud_interface(page_type: str, detail_label: str):
                 st.subheader(name)
                 st.write(f"*{detail_label}:* {detail}")
 
+                # Показуємо кількість виконань для Звичок
                 if page_type == "Звичка":
                     count = db.get_completion_count(name)
                     st.write(f"🔥 Виконано: **{count}** разів")
 
             with col2:
                 if st.button("✅ Виконати", key=f"complete_{act_id}"):
+                    # ЗАВДАННЯ ЗНИКАЄ. ЗВИЧКА ЗАЛИШАЄТЬСЯ.
                     if page_type == "Завдання":
                         db.mark_activity_completed(act_id)
 
-                    # Ініціалізація патернів з Dependency Injection
                     subject = ActivitySubject(name)
                     subject.attach(StreamlitNotifier())
-                    # Передаємо об'єкт БД як залежність (тип IStorage)
-                    subject.attach(DBLogObserver(storage=db))
-
+                    subject.attach(DBLogObserver())
                     subject.mark_completed()
                     st.rerun()
 
             with col3:
-                # Редагування
                 with st.popover("✏️ Редагувати"):
                     edit_name = st.text_input("Нова назва", value=name, key=f"edit_name_{act_id}")
 
@@ -147,7 +277,6 @@ def render_crud_interface(page_type: str, detail_label: str):
                     st.rerun()
 
 
-# Головна функція
 def main():
     st.set_page_config(page_title="Task & Habit Tracker", page_icon="📝")
     st.title("Локальний Трекер")
@@ -157,7 +286,6 @@ def main():
         st.balloons()
         del st.session_state.show_success
 
-    # Бокове меню повернуто!
     menu = st.sidebar.radio("Навігація", ["📋 Завдання", "🔁 Звички", "📊 Статистика (Логи)"])
 
     if menu == "📋 Завдання":
@@ -174,6 +302,7 @@ def main():
         if not logs:
             st.info("Історія порожня. Виконайте будь-яку звичку або завдання!")
         else:
+            # 1. Загальна статистика
             st.subheader("📊 Кількість повторень")
             stats = {}
             for log in logs:
@@ -185,6 +314,7 @@ def main():
 
             st.divider()
 
+            # 2. Детальні записи з можливістю CRUD
             st.subheader("📝 Редагування записів")
             for log in logs:
                 log_id, name, completed_at = log
