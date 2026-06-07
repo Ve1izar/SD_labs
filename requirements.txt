@@ -1,0 +1,6 @@
+streamlit~=1.56.0
+pytest
+coverage
+flake8
+pylint
+mypy
