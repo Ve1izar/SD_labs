@@ -2,6 +2,10 @@ name: Create Release Tag
 on:
   push:
     branches: [ main ]
+
+permissions:
+  contents: write
+
 jobs:
   tag:
     runs-on: ubuntu-latest
@@ -18,6 +22,8 @@ jobs:
 
     - name: Create tag
       uses: actions/github-script@v6
+      env:
+        VERSION: ${{ steps.version.outputs.version }}
       with:
         script: |
           const version = process.env.VERSION;
@@ -27,5 +33,3 @@ jobs:
             ref: `refs/tags/v${version}`,
             sha: context.sha
           });
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
